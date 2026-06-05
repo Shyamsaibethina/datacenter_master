@@ -1,0 +1,22 @@
+# OS
+.DS_Store
+
+# ── datacenter (Next.js) ──
+datacenter/node_modules/
+datacenter/.next/
+datacenter/out/
+datacenter/build/
+datacenter/.env*
+datacenter/.vercel/
+datacenter/*.tsbuildinfo
+datacenter/next-env.d.ts
+datacenter/npm-debug.log*
+datacenter/yarn-debug.log*
+datacenter/yarn-error.log*
+
+# ── fiber_api (FastAPI) ──
+fiber_api/__pycache__/
+fiber_api/**/__pycache__/
+fiber_api/venv/
+fiber_api/.env
+fiber_api/data_cache/

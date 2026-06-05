@@ -1,0 +1,36 @@
+name: Build & Push to ECR
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ main ]
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::<YOUR_ACCOUNT_ID>:role/<GITHUB_OIDC_ROLE>
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push
+        env:
+          AWS_REGION: us-east-1
+          ECR_REPO: fiber-api
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          REPO_URI=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}
+          aws ecr create-repository --repository-name ${ECR_REPO} --region ${AWS_REGION} || true
+
+          docker build -t ${ECR_REPO}:v1 .
+          docker tag ${ECR_REPO}:v1 ${REPO_URI}:v1
+          docker push ${REPO_URI}:v1

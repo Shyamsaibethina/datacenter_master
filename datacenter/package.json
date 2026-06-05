@@ -1,0 +1,37 @@
+{
+  "name": "datacenter",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build --turbopack",
+    "start": "next start",
+    "generate-types": "openapi-typescript https://2yw6yhxkjv.us-east-1.awsapprunner.com/openapi.json -o types/api-schema.ts",
+    "test:analysis": "npx tsx scripts/test-site-analysis.ts",
+    "test:chat-tools": "npx tsx scripts/test-chat-tools.ts",
+    "test": "npm run test:analysis && npm run test:chat-tools",
+    "test:e2e": "npx tsx scripts/test-chat-e2e.ts"
+  },
+  "dependencies": {
+    "@tailwindcss/typography": "^0.5.19",
+    "gl-matrix": "^3.4.4",
+    "mapbox-gl": "^3.16.0",
+    "next": "15.5.4",
+    "openai": "^5.23.0",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-map-gl": "^8.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "style-to-js": "^1.1.18"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "openapi-typescript": "^7.10.1",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

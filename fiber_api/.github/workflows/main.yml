@@ -1,0 +1,258 @@
+name: CSV ZIPs -> Parquet in S3
+
+on:
+  workflow_dispatch:
+    inputs:
+      bucket:
+        description: "S3 bucket name (e.g., broadbandinfo)"
+        required: true
+        default: "broadbandinfo"
+      prefix:
+        description: "S3 prefix where ZIPs live (e.g., '' or 'fcc/dec2024/')"
+        required: true
+        default: ""
+      out_prefix:
+        description: "S3 prefix to write Parquet (e.g., 'fiber/blocks/')"
+        required: true
+        default: "fiber/blocks/"
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install boto3 pandas pyarrow requests
+
+      - name: Show who I am + bucket region
+        run: |
+          aws sts get-caller-identity
+          aws s3api get-bucket-location --bucket broadbandinfo || true
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: List bucket root (CLI)
+        run: aws s3 ls s3://broadbandinfo/
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+      
+      - name: List via API (no prefix)
+        run: aws s3api list-objects-v2 --bucket broadbandinfo --max-keys 50
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: List ZIPs (robust)
+        id: list
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          BUCKET: ${{ github.event.inputs.bucket }}
+          PREFIX: ${{ github.event.inputs.prefix }}
+        run: |
+          python - <<'PY'
+          import os, json, sys, boto3, botocore
+      
+          bucket = os.environ['BUCKET']
+      
+          # Sanitize PREFIX: strip quotes/whitespace, treat empty as None
+          raw_prefix = os.environ.get('PREFIX', '')
+          raw_prefix = (raw_prefix or '').strip().strip('"').strip("'")
+          prefix = raw_prefix or None
+      
+          # STS identity (prove creds)
+          sts = boto3.client('sts')
+          who = sts.get_caller_identity().get('Arn')
+          print("Caller ARN:", who)
+      
+          # Resolve bucket region first, then make region-scoped S3 client
+          s3_global = boto3.client('s3')
+          try:
+              loc = s3_global.get_bucket_location(Bucket=bucket).get('LocationConstraint')
+          except botocore.exceptions.ClientError as e:
+              print("get_bucket_location failed:", e, file=sys.stderr); sys.exit(1)
+          region = loc or 'us-east-1'
+          print("Bucket region:", region)
+          s3 = boto3.client('s3', region_name=region)
+      
+          # Paginator listing (omit Prefix when None)
+          paginator = s3.get_paginator('list_objects_v2')
+          kwargs = {'Bucket': bucket}
+          if prefix:
+              kwargs['Prefix'] = prefix
+      
+          all_keys = []
+          zips = []
+          pages = 0
+          for page in paginator.paginate(**kwargs):
+              pages += 1
+              keys = [c['Key'] for c in page.get('Contents', [])]
+              all_keys.extend(keys)
+              if pages <= 2:  # log a sample
+                  print(f"[page {pages}] first keys:", keys[:10])
+              for k in keys:
+                  if k.lower().endswith('.zip'):
+                      zips.append(k)
+      
+          print("Total objects seen:", len(all_keys))
+          print("ZIPs found:", len(zips))
+          if not zips and all_keys:
+              print("Note: no *.zip after filtering; sample keys:", all_keys[:10])
+      
+          with open('zip_keys.json', 'w') as f:
+              json.dump(zips, f)
+          PY
+
+
+      - name: Convert each ZIP -> Parquet
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          BUCKET: ${{ github.event.inputs.bucket }}
+          OUT_PREFIX: ${{ github.event.inputs.out_prefix }}
+        run: |
+          python - <<'PY'
+          import os, io, csv, zipfile, math, json, re
+          import boto3, pandas as pd, pyarrow as pa, pyarrow.parquet as pq
+
+          bucket    = os.environ['BUCKET']
+          out_pref  = os.environ['OUT_PREFIX']
+          region    = os.getenv('AWS_DEFAULT_REGION','us-east-1')
+          s3 = boto3.client('s3', region_name=region)
+
+          # load the list created in previous step
+          with open('zip_keys.json','r') as f:
+            zip_keys = json.load(f)
+
+          def state_from_header(state_usps: str|None, key: str) -> str:
+            if state_usps and len(state_usps.strip())==2:
+              return state_usps.strip().upper()
+            # fallback to filename (e.g., alabama.zip -> AL)
+            base = key.rsplit('/',1)[-1].split('.')[0]
+            return base[:2].upper()
+
+          def flush_batch(writer, batch):
+            if not batch: return
+            df = pd.DataFrame(batch)
+            df['tech_code'] = 50
+            for c in ('max_down','max_up'):
+              df[c] = pd.to_numeric(df[c], errors='coerce').astype('Int64')  # Add .astype('Int64')
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            writer.write_table(table)
+            batch.clear()
+
+          # --- helper to build the schema after coercion ---
+          def normalized_schema_from_rows(rows):
+              df = pd.DataFrame(rows if rows else [{}])
+              # ensure all expected cols exist
+              for c in ['state','block_geoid','provider','tech_code','max_down','max_up','low_latency','biz_res','frn']:
+                  if c not in df: df[c] = pd.NA
+              df['tech_code'] = 50
+              # choose one: nullable integer or float; nullable int is nice if values are ints
+              for c in ('max_down','max_up'):
+                  df[c] = pd.to_numeric(df[c], errors='coerce').astype('Int64')  # or .astype(float)
+              table = pa.Table.from_pandas(df, preserve_index=False)
+              return table.schema
+
+
+          BATCH = 200_000  # tune if needed
+          for key in zip_keys:
+            print("Processing", key, flush=True)
+            bio = io.BytesIO()
+            s3.download_fileobj(bucket, key, bio)
+            bio.seek(0)
+            with zipfile.ZipFile(bio) as z:
+              inner_names = [n for n in z.namelist() if n.lower().endswith('.csv')]
+              if not inner_names:
+                print("  No CSV inside", key); continue
+              with z.open(inner_names[0]) as f:
+                text = io.TextIOWrapper(f, encoding='utf-8', newline='')
+                rdr = csv.DictReader(text, delimiter=',')
+                batch=[]
+                out_state = None
+                # Prepare Parquet writer lazily
+                pq_writer = None
+                # stream rows
+                for i, r in enumerate(rdr):
+                  # filter to FTTP (technology==50)
+                  tech = (r.get('technology') or '').strip()
+                  if tech not in ('50','50.0'):
+                    continue
+                  st = (r.get('state_usps') or '').strip()
+                  out_state = out_state or state_from_header(st, key)
+                  
+                  down_val = (r.get('max_advertised_download_speed') or '').strip()
+                  up_val = (r.get('max_advertised_upload_speed') or '').strip()
+                  
+                  if i < 5:  # Log first 5 rows
+                    print(f"  Sample row: down={down_val}, up={up_val}, block={r.get('block_geoid')}")
+
+                  row = {
+                    'state'      : st.upper() if st else out_state,
+                    'block_geoid': (r.get('block_geoid') or '').strip(),
+                    'provider'   : (r.get('brand_name') or '').strip(),
+                    'tech_code'  : 50,
+                    'max_down'   : (r.get('max_advertised_download_speed') or '').strip(),
+                    'max_up'     : (r.get('max_advertised_upload_speed') or '').strip(),
+                    'low_latency': (r.get('low_latency') or '').strip(),
+                    'biz_res'    : (r.get('business_residential_code') or '').strip(),
+                    'frn'        : (r.get('frn') or '').strip(),
+                  }
+                  # basic sanity: require state & block_geoid
+                  if not row['state'] or not row['block_geoid']:
+                    continue
+                  batch.append(row)
+                  if len(batch) >= BATCH:
+                    # open writer on first flush
+                    if pq_writer is None:
+                      out_key = f"{out_pref.rstrip('/')}/{out_state}.parquet"
+                      print("  Opening writer:", f"s3://{bucket}/{out_key}")
+                      sink = pa.BufferOutputStream()
+                      schema = normalized_schema_from_rows([row])
+                      pq_writer = (out_key, sink, pq.ParquetWriter(sink, schema, compression='snappy'))
+                    _, sink, writer = pq_writer
+                    flush_batch(writer, batch)
+
+                # Final flush
+                if batch:
+                  if pq_writer is None:
+                    out_key = f"{out_pref.rstrip('/')}/{out_state}.parquet"
+                    print("  Opening writer:", f"s3://{bucket}/{out_key}")
+                    sink = pa.BufferOutputStream()
+                    schema = normalized_schema_from_rows([batch[0]])
+                    pq_writer = (out_key, sink, pq.ParquetWriter(sink, schema, compression='snappy'))
+                  out_key, sink, writer = pq_writer
+                  flush_batch(writer, batch)
+                  writer.close()
+                  buf = sink.getvalue()
+                  data = buf.to_pybytes()               # <-- convert to Python bytes
+                  s3.put_object(
+                      Bucket=bucket,
+                      Key=out_key,
+                      Body=data,
+                      ContentType="application/parquet" # optional but nice
+                  )
+                  print("  Wrote", f"s3://{bucket}/{out_key}", "size:", len(buf), "bytes")
+                elif pq_writer:
+                  # no remaining batch but writer existed; close & upload
+                  out_key, sink, writer = pq_writer
+                  writer.close()
+                  buf = sink.getvalue()
+                  data = buf.to_pybytes()               # <-- convert to Python bytes
+                  s3.put_object(
+                      Bucket=bucket,
+                      Key=out_key,
+                      Body=data,
+                      ContentType="application/parquet" # optional but nice
+                  )
+            print("Done", key)
+          PY

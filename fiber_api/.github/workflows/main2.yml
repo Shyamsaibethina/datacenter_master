@@ -1,0 +1,123 @@
+name: Census blocks -> GeoParquet -> S3
+on:
+  workflow_dispatch:
+    inputs:
+      states:
+        description: "Space-separated FIPS (e.g. '01 02 04') — blank = ALL"
+        required: false
+        default: ""
+      bucket:
+        description: "S3 bucket name"
+        required: true
+        default: "broadbandinfo"
+      out_prefix:
+        description: "S3 prefix for GeoParquet"
+        required: true
+        default: "fiber/census_blocks/"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install tools & Python deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip
+          python -m pip install --upgrade pip
+          pip install "geopandas>=0.14,<1.0" "pyarrow>=14,<19" "pyogrio>=0.7.2" "shapely>=2.0,<3.0"
+      - name: Decide state list
+        id: st
+        run: |
+          # Lower 48 + AK, HI, DC
+          ALL="01 02 04 05 06 08 09 10 11 12 13 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 44 45 46 47 48 49 50 51 53 54 55 56"
+          if [ -z "${{ github.event.inputs.states }}" ]; then
+            echo "list=$ALL" >> $GITHUB_OUTPUT
+          else
+            echo "list=${{ github.event.inputs.states }}" >> $GITHUB_OUTPUT
+          fi
+      - name: Convert each state to GeoParquet and upload
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          BUCKET: ${{ github.event.inputs.bucket }}
+          OUT_PREFIX: ${{ github.event.inputs.out_prefix }}
+        run: |
+          set -euo pipefail
+          for FIPS in ${{ steps.st.outputs.list }}; do
+            echo "=== State $FIPS ==="
+            URL="https://www2.census.gov/geo/tiger/TIGER2020/TABBLOCK20/tl_2020_${FIPS}_tabblock20.zip"
+      
+            # Clean any leftovers
+            rm -f blocks.zip
+            rm -rf shp || true
+      
+            # Robust download (fail on HTTP error, follow redirects, retry on transient errors)
+            curl -fL --retry 5 --retry-all-errors --connect-timeout 30 -o blocks.zip "$URL" || {
+              echo "Download failed for $URL"
+              exit 1
+            }
+      
+            # Sanity-check it’s a ZIP (unzip -tq exits non-zero if invalid)
+            if ! unzip -tq blocks.zip >/dev/null 2>&1; then
+              echo "Downloaded file is not a valid ZIP for $URL"
+              echo "First 200 bytes (for debugging):"
+              head -c 200 blocks.zip || true
+              exit 2
+            fi
+      
+            unzip -q -o blocks.zip -d shp
+      
+            # Run Python to read Shapefile -> GeoParquet and name by state code
+            FIPS="$FIPS" python - <<'PY'
+          import os, glob, geopandas as gpd
+          
+          fips = os.environ["FIPS"]
+          F2S = {
+           "01":"AL","02":"AK","04":"AZ","05":"AR","06":"CA","08":"CO","09":"CT","10":"DE","11":"DC",
+           "12":"FL","13":"GA","15":"HI","16":"ID","17":"IL","18":"IN","19":"IA","20":"KS","21":"KY",
+           "22":"LA","23":"ME","24":"MD","25":"MA","26":"MI","27":"MN","28":"MS","29":"MO","30":"MT",
+           "31":"NE","32":"NV","33":"NH","34":"NJ","35":"NM","36":"NY","37":"NC","38":"ND","39":"OH",
+           "40":"OK","41":"OR","42":"PA","44":"RI","45":"SC","46":"SD","47":"TN","48":"TX","49":"UT",
+           "50":"VT","51":"VA","53":"WA","54":"WV","55":"WI","56":"WY"
+          }
+          state = F2S.get(fips, fips)
+          
+          shp_files = glob.glob("shp/*.shp")
+          if not shp_files:
+              raise SystemExit("No .shp found after unzip")
+          shp = shp_files[0]
+          
+          # Read fast with pyogrio (installed earlier)
+          gdf = gpd.read_file(shp, engine="pyogrio", columns=["GEOID20","geometry"])
+          
+          # TIGER 2020 blocks are NAD83 (EPSG:4269); if missing, set, then reproject to WGS84
+          if gdf.crs is None:
+              gdf.set_crs(4269, inplace=True)
+          gdf = gdf.to_crs(4326)
+          
+          gdf = gdf.rename(columns={"GEOID20":"block_geoid"})[["block_geoid","geometry"]]
+          gdf["block_geoid"] = gdf["block_geoid"].astype(str)
+
+          bounds = gdf.geometry.bounds
+          gdf["minx"] = bounds.minx
+          gdf["miny"] = bounds.miny
+          gdf["maxx"] = bounds.maxx
+          gdf["maxy"] = bounds.maxy
+          
+          out = f"{state}.parquet"
+          gdf.to_parquet(out, index=False)
+          print(f"Wrote {out}, rows={len(gdf)}")
+          # Write state code for shell to consume
+          with open("STATE_CODE", "w") as f:
+              f.write(state)
+          PY
+      
+            STATE=$(cat STATE_CODE)
+            KEY="${OUT_PREFIX%/}/${STATE}.parquet"
+            echo "Uploading ${STATE}.parquet -> s3://${BUCKET}/${KEY}"
+            aws s3 cp "${STATE}.parquet" "s3://${BUCKET}/${KEY}"
+      
+            # Cleanup
+            rm -rf shp blocks.zip "${STATE}.parquet" STATE_CODE
+          done

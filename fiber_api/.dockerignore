@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# CI/CD
+.github/
+
+# Documentation
+*.md
+REFACTORING_NOTES.md
+
+# Backup files
+app_backup.py
+*_backup.py
+
+# Logs
+*.log
+map_download.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Scripts (not needed in container)
+update_apprunner.sh
+start-server.sh
+*.sh
+
+# Data files
+fiber_maps/
+*.csv
+*.json
+
+# Workspace files
+*.code-workspace
+datacenter.code-workspace
+
