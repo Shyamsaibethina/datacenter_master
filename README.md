@@ -91,12 +91,6 @@ I built most of this project with **Cursor** (Agent mode) as a pair programmer �
 
 I basically had a plan already on how I would make this project, and I asked the agents to implement it for me. I designed how the apis would work and what we would need and how the communication would work, and the agent just implemented the code. The features were also something I made and told the agent in detail after using the competitor tools myself.
 
-### Honest limitations
-
-- AI sped up boilerplate and wiring; it still needed **live verification** (browser, API logs, test scripts).
-- External API flakiness (Overpass, Nominatim rate limits) required neutral fallbacks and caching — the agent suggested fixes, but judging production readiness is on me.
-- Long agent sessions sometimes needed **conversation summarization**; re-stating the current goal helped avoid drift.
-
 ### Tooling summary
 
 | Tool | Use in this project |
@@ -105,5 +99,3 @@ I basically had a plan already on how I would make this project, and I asked the
 | **Cursor chat** | Design questions (LLM tiers, map UX), quick fixes |
 | **OpenAI API** | In-app chat agent (`gpt-4o-mini`), site blurbs, IC memos |
 | **Terminal / curl / npm test** | Validation loop the agent ran repeatedly |
-
-If you’re reproducing this approach: treat the AI as a fast junior engineer with repo access — give it a clear outcome, require tests or a demo path, and review every diff.
