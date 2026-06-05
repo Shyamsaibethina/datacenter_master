@@ -88,19 +88,8 @@ I built most of this project with **Cursor** (Agent mode) as a pair programmer �
 
 6. **Test harnesses** — Scripts under `datacenter/scripts/` so the agent (and I) could verify logic without clicking through the UI every time.
 
-### How I worked with the agent effectively
 
-- **Specific prompts beat vague ones** — “Wire missing chat tools and keep working until tests pass” worked better than “make the LLM smarter.”
-- **Let it run commands** — Backend on `:8000`, frontend on `:3000`, `curl` against routes, `npm test`, restart after corrupt `.next` cache.
-- **Review diffs, don’t blind merge** — I kept scope tight (minimal diffs, match existing conventions). When something felt over-engineered, I steered back.
-- **Iterate on failures** — Chat 500s from stale Turbopack cache weren’t obvious in the UI; the agent improved error surfacing and documented the `rm -rf .next` fix.
-
-### What stayed human-owned
-
-- **Product calls** — Which scoring domains matter, fast vs. full scoring tradeoffs, tier priorities (analyst features over RAG/zoning).
-- **Acceptance** — Does the map feel right? Are chat answers grounded in tool data, not hallucinated coordinates?
-- **Secrets** — API keys in `.env`, not committed.
-- **Final review** — Architecture choices (dependency-free rectangle draw vs. adding `mapbox-gl-draw`, client-side reweighting vs. re-fetching scores).
+I basically had a plan already on how I would make this project, and I asked the agents to implement it for me. I designed how the apis would work and what we would need and how the communication would work, and the agent just implemented the code. The features were also something I made and told the agent in detail after using the competitor tools myself.
 
 ### Honest limitations
 
